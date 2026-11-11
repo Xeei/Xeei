@@ -155,6 +155,10 @@ ESP32 + E-Ink display showing currently playing Spotify songs.
 
 <div align="center">
 
+<p align="center">
+  <img src="./profile/contrib-city.svg" alt="My contribution city" width="100%">
+</p>
+
 ### "Build things that solve real problems."
 
 ⭐ Thanks for visiting!
