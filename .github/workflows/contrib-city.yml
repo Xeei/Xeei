@@ -30,8 +30,9 @@ jobs:
           # ones, turn on "Private contributions" in your profile settings.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_USER: ${{ github.repository_owner }}
-          CITY_THEME: teal # teal | green | violet | amber
+          CITY_THEME: violet # teal | green | violet | amber
           CITY_TITLE: Contribution City
+          CITY_ANIMATION: equalizer # wave | equalizer | rise | none
 
       - name: Commit if changed
         run: |

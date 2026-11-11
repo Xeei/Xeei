@@ -12,6 +12,11 @@
  *   --out   / CITY_OUT     output file (default: profile/contrib-city.svg)
  *   --theme / CITY_THEME   teal | green | violet | amber (default: teal)
  *   --title / CITY_TITLE   heading text (default: "Contribution City")
+ *   --animation / CITY_ANIMATION
+ *                          wave      buildings rise, then a wave pushes them down and up (default)
+ *                          equalizer buildings rise, then each bounces at its own pace
+ *                          rise      buildings rise once, then stay still
+ *                          none      static image
  *   --demo                 use generated sample data instead of the GitHub API
  *
  * No dependencies. Needs Node 18+ (built-in fetch).
@@ -68,8 +73,14 @@ const opts = {
   out: args.out || process.env.CITY_OUT || 'profile/contrib-city.svg',
   theme: args.theme || process.env.CITY_THEME || 'teal',
   title: args.title || process.env.CITY_TITLE || 'Contribution City',
+  animation: args.animation || process.env.CITY_ANIMATION || 'wave',
   demo: Boolean(args.demo),
 };
+const ANIMATIONS = ['wave', 'equalizer', 'rise', 'none'];
+if (!ANIMATIONS.includes(opts.animation)) {
+  console.error(`Unknown animation "${opts.animation}". Choose one of: ${ANIMATIONS.join(', ')}`);
+  process.exit(1);
+}
 if (!THEMES[opts.theme]) {
   console.error(`Unknown theme "${opts.theme}". Choose one of: ${Object.keys(THEMES).join(', ')}`);
   process.exit(1);
@@ -193,7 +204,7 @@ function computeStats(cal) {
 
 // ---------------------------------------------------------------- render ---
 
-function render(cal, stats, { user, theme, title }) {
+function render(cal, stats, { user, theme, title, animation }) {
   const T = THEMES[theme];
   const VW = 1200;
   const VH = 600;
@@ -232,44 +243,87 @@ function render(cal, stats, { user, theme, title }) {
   const depth = (c) => c.w * Math.sin(PHI) - c.d * Math.cos(PHI);
   cells.sort((a, b) => depth(a) - depth(b));
 
-  const faces = [];
   // Base plate under the whole grid.
   const nW = cal.weeks.length;
   const pad = 0.4;
   const plateH = 0.35;
   const [ax, ay, bx, by] = [-pad, -pad, nW + pad, 7 + pad];
-  faces.push(['pt', [P(ax, ay, 0), P(bx, ay, 0), P(bx, by, 0), P(ax, by, 0)]]);
-  faces.push(['pl', [P(ax, ay, -plateH), P(bx, ay, -plateH), P(bx, ay, 0), P(ax, ay, 0)]]);
-  faces.push(['pr', [P(bx, ay, -plateH), P(bx, by, -plateH), P(bx, by, 0), P(bx, ay, 0)]]);
+  const plate = [
+    ['pt', [P(ax, ay, 0), P(bx, ay, 0), P(bx, by, 0), P(ax, by, 0)]],
+    ['pl', [P(ax, ay, -plateH), P(bx, ay, -plateH), P(bx, ay, 0), P(ax, ay, 0)]],
+    ['pr', [P(bx, ay, -plateH), P(bx, by, -plateH), P(bx, by, 0), P(bx, ay, 0)]],
+  ];
 
+  // Fit the city (plate + every building at full height) into the right-hand area of the card.
+  const box = { x0: 380, x1: 1158, y0: 40, y1: 566 };
+  let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+  const extend = ([x, y]) => {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  };
+  plate.forEach(([, pts]) => pts.forEach(extend));
+  for (const c of cells)
+    for (const [dx, dy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+      extend(P(c.w + dx, c.d + dy, 0));
+      extend(P(c.w + dx, c.d + dy, c.h));
+    }
+  const s = Math.min((box.x1 - box.x0) / (maxX - minX), (box.y1 - box.y0) / (maxY - minY));
+  const ox = box.x0 + (box.x1 - box.x0 - (maxX - minX) * s) / 2 - minX * s;
+  const oy = box.y0 + (box.y1 - box.y0 - (maxY - minY) * s) / 2 - minY * s;
+  const Q = (x, y, z) => {
+    const [px, py] = P(x, y, z);
+    return [px * s + ox, py * s + oy];
+  };
+  const f = (n) => +n.toFixed(1);
+  const f2 = (n) => +n.toFixed(2);
+  const d = (pts) => `M${pts.map(([x, y]) => `${f(x)} ${f(y)}`).join('L')}Z`;
+
+  // Animation timing (seconds).
+  const animated = animation !== 'none';
+  const RISE = 0.9; // how long one building takes to rise
+  const SQUASH = 0.4; // lowest point of the wave, as a fraction of full height
+  const riseDelay = (c) => 0.2 + c.w * 0.03 + c.d * 0.02;
+  const riseEnd = riseDelay({ w: nW - 1, d: 6 }) + RISE;
+  const rand = mulberry32(nW * 7 + stats.total);
+
+  // A wall with vertical sides is a rectangle under a vertical shear. Drawing it that way
+  // (base edge at local 0,0) lets CSS stretch it with scaleY while its slanted base stays put.
+  const wall = (p0, p1, H, cls) =>
+    `<g transform="matrix(1 ${+((p1[1] - p0[1]) / (p1[0] - p0[0])).toFixed(4)} 0 1 ${f(p0[0])} ${f(p0[1])})">` +
+    `<path class="${cls} w" d="M0 0H${f(p1[0] - p0[0])}V${f(-H)}H0Z"/></g>`;
+
+  const city = plate.map(([cls, pts]) => `<path class="${cls}" d="${d(pts)}"/>`);
   for (const c of cells) {
     const x0 = c.w + GAP / 2;
     const x1 = c.w + 1 - GAP / 2;
     const y0 = c.d + GAP / 2;
     const y1 = c.d + 1 - GAP / 2;
     const h = c.h;
-    faces.push([`l${c.level}`, [P(x0, y0, 0), P(x1, y0, 0), P(x1, y0, h), P(x0, y0, h)]]); // front-left wall
-    faces.push([`r${c.level}`, [P(x1, y0, 0), P(x1, y1, 0), P(x1, y1, h), P(x1, y0, h)]]); // right wall
-    faces.push([`t${c.level}`, [P(x0, y0, h), P(x1, y0, h), P(x1, y1, h), P(x0, y1, h)]]); // roof
-  }
+    const L = c.level;
+    const roof = d([Q(x0, y0, h), Q(x1, y0, h), Q(x1, y1, h), Q(x0, y1, h)]);
 
-  // Fit the city into the right-hand area of the card.
-  const box = { x0: 380, x1: 1158, y0: 40, y1: 566 };
-  let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
-  for (const [, pts] of faces)
-    for (const [x, y] of pts) {
-      minX = Math.min(minX, x);
-      maxX = Math.max(maxX, x);
-      minY = Math.min(minY, y);
-      maxY = Math.max(maxY, y);
+    if (!animated || L === 0) {
+      // Static block: empty days are flat floor tiles and never move.
+      city.push(
+        `<path class="l${L}" d="${d([Q(x0, y0, 0), Q(x1, y0, 0), Q(x1, y0, h), Q(x0, y0, h)])}"/>` +
+          `<path class="r${L}" d="${d([Q(x1, y0, 0), Q(x1, y1, 0), Q(x1, y1, h), Q(x1, y0, h)])}"/>` +
+          `<path class="t${L}" d="${roof}"/>`,
+      );
+      continue;
     }
-  const s = Math.min((box.x1 - box.x0) / (maxX - minX), (box.y1 - box.y0) / (maxY - minY));
-  const ox = box.x0 + (box.x1 - box.x0 - (maxX - minX) * s) / 2 - minX * s;
-  const oy = box.y0 + (box.y1 - box.y0 - (maxY - minY) * s) / 2 - minY * s;
-  const f = (n) => +n.toFixed(1);
-  const city = faces
-    .map(([cls, pts]) => `<path class="${cls}" d="M${pts.map(([x, y]) => `${f(x * s + ox)} ${f(y * s + oy)}`).join('L')}Z"/>`)
-    .join('');
+
+    const H = h * Zs * s; // full height on screen
+    const [A, B, C] = [Q(x0, y0, 0), Q(x1, y0, 0), Q(x1, y1, 0)];
+    let vars = `--h:${f(H)}px;--r:${f2(riseDelay(c))}s`;
+    if (animation === 'wave') vars += `;--d:${f2(riseEnd + c.w * 0.07 + c.d * 0.035)}s`;
+    if (animation === 'equalizer') vars += `;--d:${f2(riseEnd + rand() * 2)}s;--du:${f2(1.3 + rand() * 1.5)}s`;
+    city.push(
+      `<g class="b" style="${vars}">${wall(A, B, H, `l${L}`)}${wall(B, C, H, `r${L}`)}` +
+        `<path class="t${L} tp" d="${roof}"/></g>`,
+    );
+  }
 
   // Face colours: roof lightest, front wall = base, right wall darker.
   const css = [];
@@ -278,8 +332,26 @@ function render(cal, stats, { user, theme, title }) {
     const right = mix(base, '#000000', 0.26);
     css.push(`.t${i}{fill:${roof};stroke:${roof}}.l${i}{fill:${base};stroke:${base}}.r${i}{fill:${right};stroke:${right}}`);
   });
-  const plate = mix(T.levels[0], '#000000', 0.18);
-  css.push(`.pt{fill:${plate};stroke:${plate}}.pl{fill:${mix(plate, '#000000', 0.12)}}.pr{fill:${mix(plate, '#000000', 0.3)}}`);
+  const base = mix(T.levels[0], '#000000', 0.18);
+  css.push(`.pt{fill:${base};stroke:${base}}.pl{fill:${mix(base, '#000000', 0.12)}}.pr{fill:${mix(base, '#000000', 0.3)}}`);
+
+  // Motion. Walls stretch (scale) from their base; roofs move (translate) by the matching
+  // distance, so they always meet. Rise uses the separate scale/translate properties and the
+  // loop uses transform, so the two animations stack instead of overriding each other.
+  if (animated) {
+    const pop = 'cubic-bezier(.34,1.56,.64,1)';
+    const loop = animation !== 'rise';
+    css.push(
+      `.w{transform-origin:0 0;vector-effect:non-scaling-stroke}`,
+      `@keyframes cc-rw{from{scale:1 .001}to{scale:1 1}}`,
+      `@keyframes cc-rt{from{translate:0 var(--h)}to{translate:0 0}}`,
+      `@keyframes cc-lw{0%,100%{transform:scaleY(1)}50%{transform:scaleY(${SQUASH})}}`,
+      `@keyframes cc-lt{0%,100%{transform:translateY(0)}50%{transform:translateY(calc(var(--h) * ${1 - SQUASH}))}}`,
+      `.b .w{animation:cc-rw ${RISE}s ${pop} var(--r) both${loop ? ',cc-lw var(--du,3.6s) ease-in-out var(--d) infinite' : ''}}`,
+      `.b .tp{animation:cc-rt ${RISE}s ${pop} var(--r) both${loop ? ',cc-lt var(--du,3.6s) ease-in-out var(--d) infinite' : ''}}`,
+      `@media (prefers-reduced-motion:reduce){.b *{animation:none!important}}`,
+    );
+  }
 
   // Text.
   const stat = (y, value, label) =>
@@ -316,7 +388,7 @@ ${css.join('\n')}
 </style>
 <rect x="1.5" y="1.5" width="${VW - 3}" height="${VH - 3}" rx="28" fill="url(#cc-bg)" stroke="${T.border}" stroke-opacity=".75" stroke-width="2"/>
 <rect x="1.5" y="1.5" width="${VW - 3}" height="${VH - 3}" rx="28" fill="url(#cc-glow)"/>
-<g>${city}</g>
+<g>${city.join('')}</g>
 <text x="64" y="98" class="eyebrow mono">${esc(title.toUpperCase())}</text>
 <text x="64" y="172" class="big">${compact(stats.total)}</text>
 <text x="64" y="208" class="sub">contributions in the last year</text>
